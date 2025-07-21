@@ -1,0 +1,10 @@
+sqlalchemy
+psycopg2-binary
+pydantic-settings
+loguru
+sentry-sdk
+pytz
+openai
+pgvector
+fastapi
+uvicorn

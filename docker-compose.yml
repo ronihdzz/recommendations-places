@@ -1,0 +1,10 @@
+services:
+  postgres:
+    image: ankane/pgvector
+    container_name: pgvector-db
+    environment:
+      POSTGRES_DB: places
+      POSTGRES_USER: roni
+      POSTGRES_PASSWORD: roni123
+    ports:
+      - "9999:5432"
