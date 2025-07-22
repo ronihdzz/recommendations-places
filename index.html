@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Recomendador de Lugares - IA</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <i class="fas fa-map-marker-alt"></i>
+                    <h1>Places AI</h1>
+                </div>
+                <p class="subtitle">Descubre lugares increíbles con inteligencia artificial</p>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Search Section -->
+            <section class="search-section">
+                <div class="search-container">
+                    <h2>¿Qué tipo de lugar buscas?</h2>
+                    <div class="search-box">
+                        <i class="fas fa-search search-icon"></i>
+                        <textarea 
+                            id="searchInput" 
+                            placeholder="Ej: Un restaurante romántico para una cita especial, un café acogedor para trabajar, un parque para hacer ejercicio..."
+                            rows="3"
+                        ></textarea>
+                    </div>
+                    
+                    <div class="search-controls">
+                        <div class="limit-control">
+                            <label for="limitSelect">Número de sugerencias:</label>
+                            <select id="limitSelect">
+                                <option value="5" selected>5 lugares</option>
+                                <option value="10">10 lugares</option>
+                                <option value="15">15 lugares</option>
+                                <option value="20">20 lugares</option>
+                            </select>
+                        </div>
+                        
+                        <button id="searchButton" class="search-button">
+                            <i class="fas fa-sparkles"></i>
+                            Buscar Lugares
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Loading Section -->
+            <section id="loadingSection" class="loading-section hidden">
+                <div class="loading-spinner">
+                    <div class="spinner"></div>
+                    <p>Analizando tus preferencias con IA...</p>
+                </div>
+            </section>
+
+            <!-- Results Section -->
+            <section id="resultsSection" class="results-section hidden">
+                <div class="results-header">
+                    <h3 id="resultsTitle">Lugares recomendados para ti</h3>
+                    <p id="resultsSubtitle">Basado en tu búsqueda</p>
+                </div>
+                <div id="resultsContainer" class="results-container">
+                    <!-- Results will be inserted here -->
+                </div>
+            </section>
+
+            <!-- Error Section -->
+            <section id="errorSection" class="error-section hidden">
+                <div class="error-content">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <h3>Oops! Algo salió mal</h3>
+                    <p id="errorMessage">No pudimos procesar tu solicitud. Por favor, intenta nuevamente.</p>
+                    <button id="retryButton" class="retry-button">
+                        <i class="fas fa-redo"></i>
+                        Intentar de nuevo
+                    </button>
+                </div>
+            </section>
+
+            <!-- Suggestions Section -->
+            <section class="suggestions-section">
+                <h3>Ideas para inspirarte</h3>
+                <div class="suggestion-tags">
+                    <button class="suggestion-tag" data-text="Un restaurante mexicano auténtico con ambiente familiar">
+                        <i class="fas fa-utensils"></i>
+                        Restaurante mexicano
+                    </button>
+                    <button class="suggestion-tag" data-text="Un café con wifi y ambiente tranquilo para trabajar">
+                        <i class="fas fa-coffee"></i>
+                        Café para trabajar
+                    </button>
+                    <button class="suggestion-tag" data-text="Un bar con música en vivo y ambiente nocturno">
+                        <i class="fas fa-music"></i>
+                        Bar con música
+                    </button>
+                    <button class="suggestion-tag" data-text="Un parque grande con áreas verdes para hacer ejercicio">
+                        <i class="fas fa-tree"></i>
+                        Parque deportivo
+                    </button>
+                    <button class="suggestion-tag" data-text="Un centro comercial moderno con tiendas variadas">
+                        <i class="fas fa-shopping-bag"></i>
+                        Centro comercial
+                    </button>
+                    <button class="suggestion-tag" data-text="Un museo interesante con exhibiciones culturales">
+                        <i class="fas fa-building"></i>
+                        Museo cultural
+                    </button>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Powered by OpenAI Embeddings & FastAPI</p>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html> 
