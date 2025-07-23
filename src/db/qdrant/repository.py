@@ -73,7 +73,7 @@ class PlaceEmbeddingRepository:
     def search_similar_places(
         self, 
         query_embedding: List[float], 
-        limit: int = 10,
+        limit: int = 5, 
         score_threshold: float = 0.7,
         filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
@@ -83,11 +83,11 @@ class PlaceEmbeddingRepository:
         Args:
             query_embedding: Vector de embedding de la consulta
             limit: Número máximo de resultados
-            score_threshold: Umbral mínimo de similitud
-            filters: Filtros adicionales para la búsqueda
+            score_threshold: Umbral mínimo de similitud (0.0 - 1.0)
+            filters: Filtros opcionales para metadatos
             
         Returns:
-            Lista de lugares similares con metadatos y scores
+            Lista de diccionarios con id, score y payload de lugares similares
         """
         try:
             # Construir filtros si se proporcionan
@@ -105,36 +105,65 @@ class PlaceEmbeddingRepository:
                     query_filter = Filter(must=conditions)
             
             # Realizar búsqueda
-            search_results = self.client.search(
+            search_result = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
-                query_filter=query_filter,
                 limit=limit,
-                score_threshold=score_threshold
+                score_threshold=score_threshold,
+                query_filter=query_filter,
+                with_payload=True  # Incluir metadatos en los resultados
             )
             
             # Formatear resultados
             results = []
-            for result in search_results:
-                results.append({
-                    "place_id": result.id,
-                    "score": result.score,
-                    "metadata": result.payload
-                })
+            for scored_point in search_result:
+                result = {
+                    "id": scored_point.id,
+                    "score": scored_point.score,
+                    "payload": scored_point.payload
+                }
+                results.append(result)
             
-            logger.info(f"Búsqueda completada: {len(results)} lugares encontrados")
+            logger.debug(f"Encontrados {len(results)} lugares similares (threshold: {score_threshold})")
             return results
             
         except Exception as e:
-            logger.error(f"Error en búsqueda de similitud: {e}")
+            logger.error(f"Error en búsqueda de lugares similares: {e}")
             raise
     
-    def delete_embedding(self, place_id: str):
+    def get_collection_info(self) -> Dict[str, Any]:
+        """
+        Obtiene información sobre la colección
+        
+        Returns:
+            Diccionario con información de la colección
+        """
+        try:
+            collection_info = self.client.get_collection(self.collection_name)
+            return {
+                "name": self.collection_name,
+                "points_count": collection_info.points_count,
+                "segments_count": collection_info.segments_count,
+                "disk_data_size": collection_info.disk_data_size,
+                "ram_data_size": collection_info.ram_data_size,
+                "config": {
+                    "vector_size": collection_info.config.params.vectors.size,
+                    "distance": collection_info.config.params.vectors.distance.value
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error obteniendo información de la colección: {e}")
+            return {}
+    
+    def delete_embedding(self, place_id: str) -> bool:
         """
         Elimina un embedding de lugar
         
         Args:
             place_id: ID del lugar a eliminar
+            
+        Returns:
+            True si fue exitoso, False si no
         """
         try:
             self.client.delete(
@@ -142,26 +171,8 @@ class PlaceEmbeddingRepository:
                 points_selector=[place_id]
             )
             logger.info(f"Embedding eliminado para lugar ID: {place_id}")
+            return True
             
         except Exception as e:
-            logger.error(f"Error al eliminar embedding: {e}")
-            raise
-    
-    def get_collection_info(self) -> Dict[str, Any]:
-        """
-        Obtiene información de la colección
-        
-        Returns:
-            Información de la colección
-        """
-        try:
-            info = self.client.get_collection(self.collection_name)
-            return {
-                "name": self.collection_name,  # Usar el nombre que ya tenemos
-                "vectors_count": info.vectors_count,
-                "points_count": info.points_count,
-                "status": info.status
-            }
-        except Exception as e:
-            logger.error(f"Error al obtener información de la colección: {e}")
-            raise 
+            logger.error(f"Error eliminando embedding: {e}")
+            return False 
