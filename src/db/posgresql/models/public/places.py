@@ -2,7 +2,6 @@ from sqlalchemy import Column, String, Float, Time, Numeric, Text
 from sqlalchemy.orm import relationship
 from db.posgresql.base import Base, BaseModel
 from sqlalchemy.dialects.postgresql import UUID
-from pgvector.sqlalchemy import Vector
 from .constants import PlaceCategory, PriceLevel
 
 
@@ -22,7 +21,6 @@ class Place(Base, BaseModel):
     price_average = Column(Numeric(precision=10, scale=2), nullable=True)
     price_currency = Column(String(10), nullable=True, default="MXN")
     address = Column(Text, nullable=True)
-    vector_embedding = Column(Vector(1536), nullable=True)  # OpenAI text-embedding-3-small dimensions
 
     def __repr__(self):
         return f"<Place(name='{self.name}', category='{self.category}', rating={self.rating})>"
@@ -43,7 +41,4 @@ class Place(Base, BaseModel):
             result['rating'] = float(result['rating'])
         if result.get('price_average'):
             result['price_average'] = float(result['price_average'])
-        # Convert vector to list if present
-        if result.get('vector_embedding'):
-            result['vector_embedding'] = list(result['vector_embedding'])
         return result 

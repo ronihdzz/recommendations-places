@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Generador de embeddings para lugares usando OpenAI y almacenamiento en Qdrant
+Versión actualizada que reemplaza pgvector con Qdrant
+"""
+
 import os
 import re
 import time
@@ -6,16 +12,16 @@ from decimal import Decimal
 
 import openai
 from loguru import logger
-from sqlalchemy import text
 
 from db.posgresql.connection import get_db_context
 from db.posgresql.models.public.places import Place
 from db.posgresql.repository.places import PlaceRepository
+from db.qdrant.repository import PlaceEmbeddingRepository
 from core.settings import settings
 
 
-class PlaceEmbeddingGenerator:
-    """Generador de embeddings para lugares usando OpenAI text-embedding-3-small"""
+class PlaceEmbeddingQdrantGenerator:
+    """Generador de embeddings para lugares usando OpenAI text-embedding-3-small y Qdrant"""
     
     def __init__(self, openai_api_key: str):
         """
@@ -28,6 +34,12 @@ class PlaceEmbeddingGenerator:
         self.model = "text-embedding-3-small"
         self.max_retries = 3
         self.retry_delay = 1  # segundos
+        
+        # Inicializar repositorio de Qdrant
+        self.qdrant_repo = PlaceEmbeddingRepository()
+        
+        # Crear colección si no existe
+        self.qdrant_repo.create_collection()
         
     def extract_neighborhood_from_address(self, address: str) -> str:
         """
@@ -49,74 +61,65 @@ class PlaceEmbeddingGenerator:
             r"(?:Fraccionamiento|Fracc\.?)\s+([^,\n]+)",
             r"(?:Barrio|B\.?)\s+([^,\n]+)",
             r"(?:Delegación|Del\.?)\s+([^,\n]+)",
-            r"(?:Municipio|Mpio\.?)\s+([^,\n]+)",
-            # Buscar después de la primera coma (formato común: "Calle, Colonia, Ciudad")
-            r",\s*([^,\n]+?)(?:,|\s*\d{5}|\s*C\.?P\.?|\s*$)",
         ]
         
         for pattern in patterns:
             match = re.search(pattern, address, re.IGNORECASE)
             if match:
                 neighborhood = match.group(1).strip()
-                # Limpiar números de código postal y palabras comunes
-                neighborhood = re.sub(r'\b\d{5}\b', '', neighborhood)
-                neighborhood = re.sub(r'\b(?:C\.?P\.?|CP)\b', '', neighborhood, flags=re.IGNORECASE)
-                return neighborhood.strip()
-        
-        # Si no se encuentra patrón específico, tomar el segmento después de la primera coma
-        parts = address.split(',')
-        if len(parts) > 1:
-            return parts[1].strip()
+                # Limpiar caracteres comunes no deseados
+                neighborhood = re.sub(r'[.,;]$', '', neighborhood)
+                return neighborhood
         
         return ""
     
-    def format_price_level(self, price_level: str) -> str:
+    def format_rating(self, rating: Decimal) -> str:
         """
-        Formatea el nivel de precio para texto legible
-        
-        Args:
-            price_level: Nivel de precio (ej: "$", "$$", "$$$")
-            
-        Returns:
-            Descripción legible del nivel de precio
-        """
-        if not price_level:
-            return ""
-        
-        price_mapping = {
-            "$": "económico",
-            "$$": "precio medio", 
-            "$$$": "precio alto",
-            "$$$$": "precio muy alto"
-        }
-        
-        return price_mapping.get(price_level, price_level)
-    
-    def format_rating(self, rating: Optional[Decimal]) -> str:
-        """
-        Formatea la calificación para texto legible
+        Formatea la calificación de manera descriptiva
         
         Args:
             rating: Calificación numérica
             
         Returns:
-            Descripción legible de la calificación
+            Descripción textual de la calificación
         """
-        if not rating:
+        if rating is None:
             return ""
         
         rating_float = float(rating)
         
         if rating_float >= 4.5:
-            return f"excelente calificación de {rating_float}"
+            return "excelente calificación"
         elif rating_float >= 4.0:
-            return f"muy buena calificación de {rating_float}"
+            return "muy buena calificación"
         elif rating_float >= 3.5:
-            return f"buena calificación de {rating_float}"
+            return "buena calificación"
         elif rating_float >= 3.0:
-            return f"calificación regular de {rating_float}"
+            return "calificación promedio"
         else:
-            return f"calificación de {rating_float}"
+            return "calificación regular"
+    
+    def format_price_level(self, price_level: str) -> str:
+        """
+        Formatea el nivel de precios de manera descriptiva
+        
+        Args:
+            price_level: Nivel de precios (LOW, MEDIUM, HIGH, etc.)
+            
+        Returns:
+            Descripción textual del nivel de precios
+        """
+        if not price_level:
+            return ""
+        
+        price_mapping = {
+            "LOW": "económico",
+            "MEDIUM": "moderado", 
+            "HIGH": "alto",
+            "PREMIUM": "premium"
+        }
+        
+        return price_mapping.get(price_level.upper(), price_level.lower())
     
     def generate_enriched_text(self, place: Place) -> str:
         """
@@ -202,42 +205,78 @@ class PlaceEmbeddingGenerator:
                     logger.error(f"Falló generar embedding después de {self.max_retries} intentos")
                     return None
     
-    def update_place_embedding(self, place_id: str, embedding: List[float]) -> bool:
+    def save_embedding_to_qdrant(self, place: Place, embedding: List[float]) -> bool:
         """
-        Actualiza el embedding de un lugar en la base de datos
+        Guarda el embedding de un lugar en Qdrant
         
         Args:
-            place_id: ID del lugar
+            place: Objeto Place de la base de datos
             embedding: Vector embedding
             
         Returns:
             True si fue exitoso, False si no
         """
         try:
-            with get_db_context() as session:
-                result = session.execute(
-                    text("UPDATE public.places SET vector_embedding = :embedding WHERE id = :place_id"),
-                    {"embedding": embedding, "place_id": place_id}
-                )
-                session.commit()
-                
-                if result.rowcount > 0:
-                    logger.debug(f"Embedding actualizado para lugar {place_id}")
-                    return True
-                else:
-                    logger.warning(f"No se encontró lugar con ID {place_id}")
-                    return False
+            # Preparar metadata
+            metadata = {
+                "name": place.name,
+                "description": place.description,
+                "latitude": float(place.latitude) if place.latitude else None,
+                "longitude": float(place.longitude) if place.longitude else None,
+                "category": place.category,
+                "rating": float(place.rating) if place.rating else None,
+                "price_level": place.price_level,
+                "price_average": float(place.price_average) if place.price_average else None,
+                "price_currency": place.price_currency,
+                "address": place.address,
+                "created_at": place.created_at.isoformat() if place.created_at else None,
+                "updated_at": place.updated_at.isoformat() if place.updated_at else None
+            }
+            
+            # Guardar en Qdrant
+            self.qdrant_repo.upsert_embedding(
+                place_id=str(place.id),
+                embedding=embedding,
+                metadata=metadata
+            )
+            
+            logger.debug(f"Embedding guardado en Qdrant para lugar {place.id}")
+            return True
                     
         except Exception as e:
-            logger.error(f"Error actualizando embedding para lugar {place_id}: {e}")
+            logger.error(f"Error guardando embedding en Qdrant para lugar {place.id}: {e}")
             return False
     
-    def process_all_places(self, batch_size: int = 10) -> dict:
+    def check_if_embedding_exists(self, place_id: str) -> bool:
+        """
+        Verifica si ya existe un embedding para el lugar en Qdrant
+        
+        Args:
+            place_id: ID del lugar
+            
+        Returns:
+            True si existe, False si no
+        """
+        try:
+            # Intentar obtener el punto de Qdrant
+            points = self.qdrant_repo.client.retrieve(
+                collection_name=self.qdrant_repo.collection_name,
+                ids=[place_id]
+            )
+            
+            return len(points) > 0
+            
+        except Exception as e:
+            logger.debug(f"No se encontró embedding para lugar {place_id}: {e}")
+            return False
+    
+    def process_all_places(self, batch_size: int = 10, skip_existing: bool = True) -> dict:
         """
         Procesa todos los lugares y genera sus embeddings
         
         Args:
             batch_size: Número de lugares a procesar por lote
+            skip_existing: Si saltar lugares que ya tienen embedding en Qdrant
             
         Returns:
             Diccionario con estadísticas del procesamiento
@@ -257,6 +296,7 @@ class PlaceEmbeddingGenerator:
                 # Obtener conteo total
                 stats["total_places"] = repository.count()
                 logger.info(f"Iniciando procesamiento de {stats['total_places']} lugares")
+                logger.info(f"Almacenamiento: Qdrant (colección: {self.qdrant_repo.collection_name})")
                 
                 # Procesar en lotes
                 offset = 0
@@ -271,9 +311,9 @@ class PlaceEmbeddingGenerator:
                         stats["processed"] += 1
                         
                         try:
-                            # Verificar si ya tiene embedding
-                            if place.vector_embedding is not None:
-                                logger.debug(f"Lugar {place.name} ya tiene embedding, saltando...")
+                            # Verificar si ya tiene embedding en Qdrant
+                            if skip_existing and self.check_if_embedding_exists(str(place.id)):
+                                logger.debug(f"Lugar {place.name} ya tiene embedding en Qdrant, saltando...")
                                 stats["skipped"] += 1
                                 continue
                             
@@ -293,13 +333,13 @@ class PlaceEmbeddingGenerator:
                                 stats["failed"] += 1
                                 continue
                             
-                            # Actualizar base de datos
-                            if self.update_place_embedding(str(place.id), embedding):
+                            # Guardar en Qdrant
+                            if self.save_embedding_to_qdrant(place, embedding):
                                 stats["successful"] += 1
                                 logger.info(f"✅ Procesado exitosamente: {place.name}")
                             else:
                                 stats["failed"] += 1
-                                logger.error(f"❌ Error actualizando BD para: {place.name}")
+                                logger.error(f"❌ Error guardando en Qdrant: {place.name}")
                             
                             # Pequeña pausa para evitar rate limiting
                             time.sleep(0.1)
@@ -319,41 +359,68 @@ class PlaceEmbeddingGenerator:
             logger.error(f"Error durante el procesamiento: {e}")
         
         return stats
+    
+    def get_collection_stats(self) -> dict:
+        """
+        Obtiene estadísticas de la colección de Qdrant
+        
+        Returns:
+            Diccionario con estadísticas
+        """
+        try:
+            return self.qdrant_repo.get_collection_info()
+        except Exception as e:
+            logger.error(f"Error obteniendo estadísticas de Qdrant: {e}")
+            return {}
 
 
 def main():
     """Función principal"""
-    logger.info("🚀 Iniciando generación de embeddings para lugares")
+    logger.info("🚀 Iniciando generación de embeddings para lugares (Qdrant)")
     
-    # Obtener API key de OpenAI desde variable de entorno
+    # Obtener API key de OpenAI desde configuración
     openai_api_key = settings.OPENAI_API_KEY
     if not openai_api_key:
         logger.error("❌ OPENAI_API_KEY no está configurada en las variables de entorno")
         return
     
     # Crear generador
-    generator = PlaceEmbeddingGenerator(openai_api_key)
+    generator = PlaceEmbeddingQdrantGenerator(openai_api_key)
+    
+    # Mostrar estadísticas iniciales de Qdrant
+    initial_stats = generator.get_collection_stats()
+    if initial_stats:
+        logger.info(f"📊 Estado inicial de Qdrant:")
+        logger.info(f"   - Colección: {initial_stats.get('name', 'N/A')}")
+        logger.info(f"   - Puntos existentes: {initial_stats.get('points_count', 0)}")
     
     # Procesar todos los lugares
-    stats = generator.process_all_places(batch_size=10)
+    stats = generator.process_all_places(batch_size=10, skip_existing=True)
+    
+    # Mostrar estadísticas finales de Qdrant
+    final_stats = generator.get_collection_stats()
     
     # Mostrar resumen final
     logger.info("📊 Resumen final:")
-    logger.info(f"  Total de lugares: {stats['total_places']}")
+    logger.info(f"  Total de lugares en PostgreSQL: {stats['total_places']}")
     logger.info(f"  Lugares procesados: {stats['processed']}")
     logger.info(f"  Exitosos: {stats['successful']}")
     logger.info(f"  Fallidos: {stats['failed']}")
-    logger.info(f"  Saltados (ya tenían embedding): {stats['skipped']}")
+    logger.info(f"  Saltados (ya existían): {stats['skipped']}")
+    
+    if final_stats:
+        logger.info(f"  Total en Qdrant: {final_stats.get('points_count', 0)}")
     
     if stats['processed'] > 0:
         success_rate = (stats['successful'] / stats['processed']) * 100
         logger.info(f"  Tasa de éxito: {success_rate:.1f}%")
     
     if stats['successful'] > 0:
-        logger.info("✅ Proceso completado exitosamente")
+        logger.success("✅ Proceso completado exitosamente")
+        logger.info("💡 Los embeddings están ahora disponibles en Qdrant para búsquedas de similitud")
     else:
         logger.warning("⚠️ No se procesó ningún lugar exitosamente")
 
 
 if __name__ == "__main__":
-    main()
+    main() 

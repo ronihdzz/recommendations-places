@@ -1,11 +1,13 @@
 import os
 from typing import List, Dict
+from uuid import UUID
 
 import openai
 from loguru import logger
-from sqlalchemy import text
 
 from db.posgresql.connection import get_db_context
+from db.posgresql.repository.places import PlaceRepository
+from db.qdrant.repository import PlaceEmbeddingRepository
 from .schema import RecommendationResponse, PlaceRecommendation
 
 
@@ -25,10 +27,20 @@ class PlaceRecommendationService:
         
         self.openai_client = openai.OpenAI(api_key=api_key)
         self.model = "text-embedding-3-small"
+        
+        # Inicializar repositorio de Qdrant
+        self.qdrant_repo = PlaceEmbeddingRepository()
     
     async def get_recommendations(self, description: str, limit: int = 5) -> RecommendationResponse:
         """
         Obtiene recomendaciones de lugares basado en una descripción de texto
+        
+        FLUJO:
+        1. Convierte el texto del usuario en embedding
+        2. Busca en Qdrant los lugares más similares
+        3. Obtiene los IDs de los lugares más parecidos
+        4. Consulta PostgreSQL para obtener los datos completos
+        5. Retorna los resultados ordenados por relevancia
         
         Args:
             description: Descripción del tipo de lugar que buscas
@@ -38,8 +50,8 @@ class PlaceRecommendationService:
             RecommendationResponse con los lugares recomendados
         """
         try:
-            # 1. Generar embedding de la descripción
-            logger.info(f"Generando recomendaciones para: '{description}'")
+            # 1. Convertir el texto del usuario en embedding
+            logger.info(f"🔍 Generando recomendaciones para: '{description}'")
             
             response = self.openai_client.embeddings.create(
                 model=self.model,
@@ -47,51 +59,66 @@ class PlaceRecommendationService:
             )
             
             query_embedding = response.data[0].embedding
+            logger.debug(f"✅ Embedding generado con {len(query_embedding)} dimensiones")
             
-            # 2. Buscar lugares similares en la base de datos
+            # 2. Buscar en Qdrant los lugares más similares
+            similar_places = self.qdrant_repo.search_similar_places(
+                query_embedding=query_embedding,
+                limit=limit,
+                score_threshold=0.1  # Solo lugares con al menos 70% de similitud
+            )
+            
+            if not similar_places:
+                logger.info("❌ No se encontraron lugares similares en Qdrant")
+                return RecommendationResponse(
+                    query=description,
+                    total_found=0,
+                    recommendations=[]
+                )
+            
+            # 3. Obtener los IDs de los lugares más parecidos
+            place_ids = [result["id"] for result in similar_places]
+            logger.info(f"🎯 Encontrados {len(place_ids)} lugares similares en Qdrant")
+            
+            # 4. Consultar PostgreSQL para obtener los datos completos
             with get_db_context() as session:
-                sql_query = text("""
-                    SELECT 
-                        id,
-                        name,
-                        category,
-                        description,
-                        rating,
-                        price_level,
-                        address,
-                        vector_embedding <-> CAST(:query_embedding AS vector) as distance
-                    FROM public.places 
-                    WHERE vector_embedding IS NOT NULL
-                      AND deleted_at IS NULL
-                    ORDER BY distance
-                    LIMIT :limit
-                """)
-                
-                # Convertir el embedding a formato string para PostgreSQL
-                embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
-                
-                result = session.execute(sql_query, {
-                    "query_embedding": embedding_str,
-                    "limit": limit
-                }).fetchall()
-                
-                # 3. Formatear resultados
+                place_repository = PlaceRepository(session)
                 recommendations = []
-                for row in result:
-                    place_recommendation = PlaceRecommendation(
-                        id=str(row.id),
-                        name=row.name,
-                        category=row.category,
-                        description=row.description,
-                        rating=float(row.rating) if row.rating else None,
-                        price_level=row.price_level,
-                        address=row.address,
-                        similarity_score=round((1 - float(row.distance)) * 100, 1)  # Convertir distancia a porcentaje de similitud
-                    )
-                    recommendations.append(place_recommendation)
                 
-                logger.success(f"✅ Encontradas {len(recommendations)} recomendaciones")
+                for result in similar_places:
+                    place_id = result["id"]
+                    similarity_score = result["score"]
+                    
+                    try:
+                        # Convertir string ID a UUID
+                        place_uuid = UUID(place_id)
+                        
+                        # Obtener datos completos del lugar desde PostgreSQL
+                        place = place_repository.get_by_id(place_uuid)
+                        
+                        if place:
+                            place_recommendation = PlaceRecommendation(
+                                id=str(place.id),
+                                name=place.name,
+                                category=place.category,
+                                description=place.description,
+                                rating=float(place.rating) if place.rating else None,
+                                price_level=place.price_level,
+                                address=place.address,
+                                similarity_score=round(similarity_score * 100, 1)
+                            )
+                            recommendations.append(place_recommendation)
+                            logger.debug(f"✅ Lugar encontrado: {place.name} (similitud: {similarity_score:.3f})")
+                        else:
+                            logger.warning(f"⚠️ Lugar {place_id} no encontrado en PostgreSQL")
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Error procesando lugar {place_id}: {e}")
+                        continue
                 
+                logger.success(f"✅ Se encontraron {len(recommendations)} recomendaciones válidas")
+                
+                # 5. Retornar resultados ordenados por relevancia (ya están ordenados por Qdrant)
                 return RecommendationResponse(
                     query=description,
                     total_found=len(recommendations),
