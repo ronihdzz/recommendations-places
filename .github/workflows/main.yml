@@ -1,0 +1,196 @@
+name: FastAPI CI/CD
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+    branches: [main, development]
+
+permissions:
+  contents: write
+
+# Re‐usar versiones y directorios en todos los jobs
+env:
+  PYTHON_VERSION: "3.12"
+  COVERAGE_REPORTS: coverage-reports
+
+###############################################################################
+# 1.  LINTING – pre-commit
+###############################################################################
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pypoetry
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: ${{ runner.os }}-poetry-
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root --with dev
+
+      - name: Run pre-commit
+        run: poetry run pre-commit run
+
+
+###############################################################################
+# 2.  TEST – contenedores + cobertura
+###############################################################################
+  test:
+    runs-on: ubuntu-latest
+    needs: lint        # solo se ejecuta si lint pasa
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      mongodb:
+        image: mongo:4.4
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd="mongo --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+      redis:
+        image: redis:6
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: 🧾 Checkout code
+        uses: actions/checkout@v3
+
+      - name: 🏗️ Build test image
+        run: |
+          docker build --progress=plain -t my-test-image -f docker_images/testing/Dockerfile.testing .
+
+      - name: 🚀 Run tests in container
+        run: |
+          docker run \
+            --name my-tests \
+            --network=host \
+            -e CI=true \
+            -e GITHUB_DATABASE_POSTGRESQL=postgresql://test:test@localhost:5432/test_db \
+            -e GITHUB_DATABASE_MONGODB=mongodb://localhost:27017 \
+            -e GITHUB_DATABASE_REDIS=redis://localhost:6379 \
+            -v ${{ github.workspace }}/artifacts:/app/artifacts \
+            my-test-image
+
+      - name: 📥 Copiar reportes desde el contenedor
+        run: |
+          mkdir -p ${{ env.COVERAGE_REPORTS }}
+          docker cp my-tests:/app/coverage-reports/. ${{ env.COVERAGE_REPORTS }}
+
+          echo "📄 Archivos copiados desde el contenedor:"
+          ls -lh ${{ env.COVERAGE_REPORTS }}
+
+      - name: 📤 Subir cobertura como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.COVERAGE_REPORTS }}
+          path: ${{ env.COVERAGE_REPORTS }}
+
+      - name: Guardar coverage
+        uses: ronihdzz/git-archive-action@v3
+        with:
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts-branch: 'artifacts'
+          coverage-source: ${{ env.COVERAGE_REPORTS }}
+          is-artifact: false
+
+
+###############################################################################
+# 3.  BUILD 
+###############################################################################
+
+  build-and-push-docker-hub:
+    name: Push to Docker Hub
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Build and Push
+        uses: ronihdzz/push-to-dockerhub-action@v2
+        with:
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_PASSWORD }}
+          dockerhub-repository: ${{ vars.DOCKERHUB_REPOSITORY }}
+          dockerfile-path: "docker_images/app/Dockerfile.app"
+          branch-environment-map: '{"main": "prod", "development": "dev", "staging": "stg", "testing": "tst"}'
+
+
+###############################################################################
+# 4.  DEPLOY – Dokploy webhook
+###############################################################################
+  deploy-dokploy:
+    name: 🚀 Redeploy on Dokploy
+    runs-on: ubuntu-latest
+    needs: build-and-push-docker-hub
+
+    steps:
+      - name: 🔗 Trigger Dokploy webhook
+        id: dokploy
+        env:
+          WEBHOOK_URL: ${{ secrets.DOKPLOY_DEPLOY_WEBHOOK_URL }}
+        run: |
+          echo "🌐  Calling Dokploy redeploy webhook…"
+          set -euo pipefail
+
+          # ▸ Hacemos la petición y separamos cuerpo + status
+          RAW_RESPONSE=$(curl -sSL -w "\n%{http_code}" -X POST "${WEBHOOK_URL}")
+          BODY=$(echo "${RAW_RESPONSE}" | head -n -1)
+          HTTP_CODE=$(echo "${RAW_RESPONSE}" | tail -n 1)
+
+          echo "🔢 HTTP status: ${HTTP_CODE}"
+          echo "📨 Response body:"
+          echo "${BODY}"
+
+          # Guardar en outputs (compacto, sin saltos de línea)
+          BODY_ESCAPED=$(echo "${BODY}" | tr -d '\n' | tr -d '\r')
+          echo "response=${BODY_ESCAPED}" >> "$GITHUB_OUTPUT"
+
+          # Fallar si el código HTTP indica error
+          if [ "${HTTP_CODE}" -ge 400 ]; then
+            echo "::error::Deploy failed – API returned ${HTTP_CODE}"
+            exit 1
+          fi
+
+      - name: ✅ Deploy summary
+        run: |
+          echo "### Dokploy answered:" >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.dokploy.outputs.response }}' >> "$GITHUB_STEP_SUMMARY"
