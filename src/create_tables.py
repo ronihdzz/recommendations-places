@@ -51,7 +51,8 @@ def create_specific_tables(engine, tables: list):
 def prepare_specific_tables(models: list, schemas_to_create: list[str]):
     logger.info(f"Creating tables")
     engine = create_engine(
-        settings.POSTGRESQL_URL.unicode_string(),
+        #settings.POSTGRESQL_URL.unicode_string(),
+        settings.POSTGRESQL_URL,
         poolclass=NullPool,
         echo=True  # <-- ¡Activa logs!
     )

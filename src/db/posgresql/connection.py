@@ -9,10 +9,12 @@ from core.settings import settings
 
 application_name = settings.PROJECT.NAME.replace(" ", "-").lower()
 engine = create_engine(
-    settings.POSTGRESQL_URL.unicode_string(), connect_args={"application_name": application_name}, poolclass=NullPool
+    #settings.POSTGRESQL_URL.unicode_string(),
+    settings.POSTGRESQL_URL,
+    connect_args={"application_name": application_name},
+    poolclass=NullPool
 )
 SessionLocal = sessionmaker(autocommit=False, bind=engine)
-
 
 @contextmanager
 def get_db_context():

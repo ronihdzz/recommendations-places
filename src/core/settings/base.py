@@ -64,7 +64,8 @@ class Settings(BaseSettings):
     # Database settings
     # ----------------------------------------------------------------
 
-    POSTGRESQL_URL: PostgresDsn
+    # POSTGRESQL_URL: PostgresDsn
+    POSTGRESQL_URL: str
     OPENAI_API_KEY: str
     # MONGO_URL: MongoDsn
     #REDIS_URL: RedisDsn
