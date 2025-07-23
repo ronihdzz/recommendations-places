@@ -69,3 +69,9 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str
     # MONGO_URL: MongoDsn
     #REDIS_URL: RedisDsn
+    
+    # Qdrant settings
+    # ----------------------------------------------------------------
+    
+    QDRANT_URL: str
+    QDRANT_COLLECTION_NAME: str = Field(default="places_embeddings")
