@@ -13,6 +13,7 @@ services:
     image: qdrant/qdrant:latest
     container_name: qdrant-db
     environment:
+      QDRANT__SERVICE__API_KEY: 1234
       QDRANT__SERVICE__HTTP_PORT: 6333
       QDRANT__SERVICE__GRPC_PORT: 6334
     ports:

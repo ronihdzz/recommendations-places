@@ -4,8 +4,53 @@ from fastapi import Request, Header, APIRouter, HTTPException, status
 from shared.base_responses import EnvelopeResponse, create_response_for_fast_api
 from .schema import RecommendationRequest, RecommendationResponse
 from .services import get_recommendation_service
+from db.qdrant.connection import qdrant_health_check
 
 router = APIRouter(prefix="/places", tags=["Places"])
+
+
+@router.get("/health/qdrant", summary="Verificar estado de Qdrant")
+async def get_qdrant_health() -> dict:
+    """
+    Verifica el estado de la conexión con Qdrant y proporciona información de diagnóstico.
+    
+    Este endpoint es útil para:
+    - Verificar si Qdrant está ejecutándose
+    - Comprobar tiempos de respuesta
+    - Ver información de colecciones disponibles
+    - Diagnosticar problemas de conexión
+    
+    Returns:
+        Información detallada del estado de Qdrant
+    """
+    try:
+        health_status = qdrant_health_check()
+        
+        if health_status.get("connected", False):
+            return create_response_for_fast_api(
+                status_code_http=status.HTTP_200_OK,
+                data=health_status,
+                message="Qdrant está funcionando correctamente"
+            )
+        else:
+            return create_response_for_fast_api(
+                status_code_http=status.HTTP_503_SERVICE_UNAVAILABLE,
+                data=health_status,
+                message=f"Qdrant no está disponible: {health_status.get('error', 'Conexión fallida')}"
+            )
+            
+    except Exception as e:
+        error_details = {
+            "connected": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+        
+        return create_response_for_fast_api(
+            status_code_http=status.HTTP_503_SERVICE_UNAVAILABLE,
+            data=error_details,
+            message=f"Error verificando estado de Qdrant: {str(e)}"
+        )
 
 
 @router.post("/recommendations", response_model=EnvelopeResponse, summary="Obtener recomendaciones de lugares")

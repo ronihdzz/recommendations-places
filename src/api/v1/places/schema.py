@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, ConfigDict, field_serializer
 from uuid import UUID
 from datetime import datetime
 from typing import Optional
+from decimal import Decimal
 
 
 class RecommendationRequest(BaseModel):
@@ -12,14 +13,28 @@ class RecommendationRequest(BaseModel):
 
 class PlaceRecommendation(BaseModel):
     """Schema para lugar recomendado"""
-    id: str = Field(..., description="ID único del lugar")
+    id: UUID = Field(..., description="ID único del lugar")
     name: str = Field(..., description="Nombre del lugar")
-    category: str = Field(..., description="Categoría del lugar")
     description: Optional[str] = Field(None, description="Descripción del lugar")
-    rating: Optional[float] = Field(None, description="Calificación del lugar")
+    latitude: Optional[Decimal] = Field(None, description="Latitud del lugar")
+    longitude: Optional[Decimal] = Field(None, description="Longitud del lugar")
+    category: str = Field(..., description="Categoría del lugar")
+    rating: Optional[Decimal] = Field(None, description="Calificación del lugar")
     price_level: Optional[str] = Field(None, description="Nivel de precios")
+    price_average: Optional[Decimal] = Field(None, description="Precio promedio")
+    price_currency: Optional[str] = Field(None, description="Moneda del precio")
     address: Optional[str] = Field(None, description="Dirección del lugar")
-    similarity_score: float = Field(..., description="Porcentaje de similitud con la descripción")
+    similarity_score: float = Field(..., description="Score de similitud con la descripción (0.0 - 1.0)")
+
+    @field_serializer('latitude', 'longitude', 'rating', 'price_average')
+    def serialize_decimal(self, value: Optional[Decimal]) -> Optional[float]:
+        """Convierte Decimal a float para serialización JSON"""
+        return float(value) if value is not None else None
+
+    @field_serializer('id')
+    def serialize_id(self, value: UUID) -> str:
+        """Convierte UUID a string para serialización JSON"""
+        return str(value)
 
 
 class RecommendationResponse(BaseModel):

@@ -26,6 +26,27 @@ class PlaceRepository:
             and_(Place.id == place_id, Place.deleted_at.is_(None))
         ).first()
 
+    def get_places_by_ids(self, place_ids: List[str]) -> List[Place]:
+        """Get multiple places by their IDs"""
+        # Convertir string IDs a UUID objects
+        uuid_ids = []
+        for place_id in place_ids:
+            try:
+                if isinstance(place_id, str):
+                    uuid_ids.append(UUID(place_id))
+                else:
+                    uuid_ids.append(place_id)
+            except ValueError:
+                # Skip invalid UUIDs
+                continue
+        
+        if not uuid_ids:
+            return []
+            
+        return self.session.query(Place).filter(
+            and_(Place.id.in_(uuid_ids), Place.deleted_at.is_(None))
+        ).all()
+
     def get_by_name(self, name: str) -> Optional[Place]:
         """Get a place by its name"""
         return self.session.query(Place).filter(

@@ -74,4 +74,5 @@ class Settings(BaseSettings):
     # ----------------------------------------------------------------
     
     QDRANT_URL: str
+    QDRANT_API_KEY: str | None = None
     QDRANT_COLLECTION_NAME: str = Field(default="places_embeddings")

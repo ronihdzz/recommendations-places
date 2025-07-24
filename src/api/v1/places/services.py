@@ -1,4 +1,5 @@
 import os
+import time
 from typing import List, Dict
 from uuid import UUID
 
@@ -8,6 +9,7 @@ from loguru import logger
 from db.posgresql.connection import get_db_context
 from db.posgresql.repository.places import PlaceRepository
 from db.qdrant.repository import PlaceEmbeddingRepository
+from db.qdrant.connection import qdrant_health_check
 from .schema import RecommendationResponse, PlaceRecommendation
 
 
@@ -30,6 +32,10 @@ class PlaceRecommendationService:
         
         # Inicializar repositorio de Qdrant
         self.qdrant_repo = PlaceEmbeddingRepository()
+        
+        logger.info(f"🤖 Servicio de recomendaciones inicializado:")
+        logger.info(f"   🔧 Modelo OpenAI: {self.model}")
+        logger.info(f"   📊 Colección Qdrant: {self.qdrant_repo.collection_name}")
     
     async def get_recommendations(self, description: str, limit: int = 5) -> RecommendationResponse:
         """
@@ -49,84 +55,184 @@ class PlaceRecommendationService:
         Returns:
             RecommendationResponse con los lugares recomendados
         """
+        start_time = time.time()
+        logger.info(f"🔍 Generando recomendaciones para: '{description}'")
+        logger.info(f"   🎯 Límite solicitado: {limit}")
+        
         try:
-            # 1. Convertir el texto del usuario en embedding
-            logger.info(f"🔍 Generando recomendaciones para: '{description}'")
-            
-            response = self.openai_client.embeddings.create(
-                model=self.model,
-                input=description
-            )
-            
-            query_embedding = response.data[0].embedding
-            logger.debug(f"✅ Embedding generado con {len(query_embedding)} dimensiones")
-            
-            # 2. Buscar en Qdrant los lugares más similares
-            similar_places = self.qdrant_repo.search_similar_places(
-                query_embedding=query_embedding,
-                limit=limit,
-                score_threshold=0.1  # Solo lugares con al menos 70% de similitud
-            )
-            
-            if not similar_places:
-                logger.info("❌ No se encontraron lugares similares en Qdrant")
+            # Pre-verificación: Estado de Qdrant
+            logger.debug("🏥 Verificando estado de Qdrant...")
+            health = qdrant_health_check()
+            if not health.get("connected", False):
+                error_msg = f"Qdrant no está disponible: {health.get('error', 'Conexión fallida')}"
+                logger.error(f"🚫 {error_msg}")
+                logger.error(f"   📍 URL: {health.get('url', 'N/A')}")
+                logger.error(f"   💡 Verifica que Qdrant esté ejecutándose")
+                
                 return RecommendationResponse(
                     query=description,
                     total_found=0,
                     recommendations=[]
                 )
             
-            # 3. Obtener los IDs de los lugares más parecidos
-            place_ids = [result["id"] for result in similar_places]
-            logger.info(f"🎯 Encontrados {len(place_ids)} lugares similares en Qdrant")
+            logger.debug(f"✅ Qdrant disponible ({health.get('response_time', 0):.3f}s)")
             
-            # 4. Consultar PostgreSQL para obtener los datos completos
-            with get_db_context() as session:
-                place_repository = PlaceRepository(session)
-                recommendations = []
-                
-                for result in similar_places:
-                    place_id = result["id"]
-                    similarity_score = result["score"]
-                    
-                    try:
-                        # Convertir string ID a UUID
-                        place_uuid = UUID(place_id)
-                        
-                        # Obtener datos completos del lugar desde PostgreSQL
-                        place = place_repository.get_by_id(place_uuid)
-                        
-                        if place:
-                            place_recommendation = PlaceRecommendation(
-                                id=str(place.id),
-                                name=place.name,
-                                category=place.category,
-                                description=place.description,
-                                rating=float(place.rating) if place.rating else None,
-                                price_level=place.price_level,
-                                address=place.address,
-                                similarity_score=round(similarity_score * 100, 1)
-                            )
-                            recommendations.append(place_recommendation)
-                            logger.debug(f"✅ Lugar encontrado: {place.name} (similitud: {similarity_score:.3f})")
-                        else:
-                            logger.warning(f"⚠️ Lugar {place_id} no encontrado en PostgreSQL")
-                            
-                    except Exception as e:
-                        logger.error(f"❌ Error procesando lugar {place_id}: {e}")
-                        continue
-                
-                logger.success(f"✅ Se encontraron {len(recommendations)} recomendaciones válidas")
-                
-                # 5. Retornar resultados ordenados por relevancia (ya están ordenados por Qdrant)
-                return RecommendationResponse(
-                    query=description,
-                    total_found=len(recommendations),
-                    recommendations=recommendations
+            # 1. Convertir el texto del usuario en embedding
+            logger.debug("🧠 Generando embedding con OpenAI...")
+            embedding_start = time.time()
+            
+            try:
+                response = self.openai_client.embeddings.create(
+                    model=self.model,
+                    input=description
                 )
                 
+                query_embedding = response.data[0].embedding
+                embedding_time = time.time() - embedding_start
+                
+                logger.success(f"✅ Embedding generado ({embedding_time:.3f}s)")
+                logger.debug(f"   📏 Dimensiones: {len(query_embedding)}")
+                
+            except Exception as openai_error:
+                logger.error(f"🚫 Error generando embedding con OpenAI:")
+                logger.error(f"   🔧 Modelo: {self.model}")
+                logger.error(f"   📝 Input: '{description[:100]}{'...' if len(description) > 100 else ''}'")
+                logger.error(f"   🔥 Error: {openai_error}")
+                raise
+            
+            # 2. Buscar en Qdrant los lugares más similares
+            logger.debug("🎯 Buscando lugares similares en Qdrant...")
+            
+            try:
+                similar_places = self.qdrant_repo.search_similar_places(
+                    query_embedding=query_embedding,
+                    limit=limit,
+                    score_threshold=0.1  # Solo lugares con al menos 10% de similitud
+                )
+                
+                logger.info(f"📊 Qdrant encontró {len(similar_places)} lugares similares")
+                
+                if not similar_places:
+                    logger.warning("⚠️ No se encontraron lugares similares en Qdrant")
+                    logger.warning("   💡 Posibles causas:")
+                    logger.warning("   - Colección vacía o sin datos")
+                    logger.warning("   - Score threshold muy alto")
+                    logger.warning("   - Embedding query muy específico")
+                    
+                    return RecommendationResponse(
+                        query=description,
+                        total_found=0,
+                        recommendations=[]
+                    )
+                    
+            except Exception as qdrant_error:
+                logger.error(f"🚫 Error en búsqueda vectorial Qdrant:")
+                logger.error(f"   📊 Colección: {self.qdrant_repo.collection_name}")
+                logger.error(f"   🔥 Tipo: {type(qdrant_error).__name__}")
+                logger.error(f"   📝 Error: {qdrant_error}")
+                
+                # Información adicional de contexto
+                if "Connection refused" in str(qdrant_error):
+                    logger.error(f"   💡 Qdrant parece no estar ejecutándose")
+                    logger.error(f"   🔧 Ejecuta: docker-compose up qdrant")
+                elif "404" in str(qdrant_error):
+                    logger.error(f"   💡 La colección '{self.qdrant_repo.collection_name}' no existe")
+                    logger.error(f"   🔧 Ejecuta el script de embeddings para crearla")
+                
+                raise
+            
+            # 3. Obtener los IDs de los lugares más parecidos
+            place_ids = [result["id"] for result in similar_places]
+            logger.debug(f"🆔 IDs encontrados: {place_ids}")
+            
+            # 4. Consultar PostgreSQL para obtener los datos completos
+            logger.debug("🗄️ Consultando datos completos en PostgreSQL...")
+            db_start = time.time()
+            
+            try:
+                with get_db_context() as session:
+                    place_repo = PlaceRepository(session)
+                    places = place_repo.get_places_by_ids(place_ids)
+                    
+                db_time = time.time() - db_start
+                logger.debug(f"✅ PostgreSQL consultado ({db_time:.3f}s)")
+                logger.info(f"📋 Obtenidos {len(places)} lugares de PostgreSQL")
+                
+                if len(places) != len(place_ids):
+                    logger.warning(f"⚠️ Discrepancia en datos:")
+                    logger.warning(f"   🎯 IDs solicitados: {len(place_ids)}")
+                    logger.warning(f"   📋 Places encontrados: {len(places)}")
+                    
+            except Exception as db_error:
+                logger.error(f"🚫 Error consultando PostgreSQL:")
+                logger.error(f"   🆔 IDs buscados: {place_ids}")
+                logger.error(f"   🔥 Error: {db_error}")
+                raise
+            
+            # 5. Combinar datos de similitud con datos de PostgreSQL
+            logger.debug("🔗 Combinando datos de Qdrant y PostgreSQL...")
+            
+            # Crear mapa de scores por ID
+            score_map = {result["id"]: result["score"] for result in similar_places}
+            
+            recommendations = []
+            for place in places:
+                place_id = str(place.id)
+                similarity_score = score_map.get(place_id, 0.0)
+                
+                recommendation = PlaceRecommendation(
+                    id=place.id,
+                    name=place.name,
+                    description=place.description,
+                    latitude=place.latitude,
+                    longitude=place.longitude,
+                    category=place.category,
+                    rating=place.rating,
+                    price_level=place.price_level,
+                    price_average=place.price_average,
+                    price_currency=place.price_currency,
+                    address=place.address,
+                    similarity_score=similarity_score
+                )
+                recommendations.append(recommendation)
+            
+            # Ordenar por score de similitud (ya debería estar ordenado, pero por seguridad)
+            recommendations.sort(key=lambda x: x.similarity_score, reverse=True)
+            
+            total_time = time.time() - start_time
+            
+            logger.success(f"✅ Recomendaciones generadas exitosamente!")
+            logger.info(f"   ⏱️  Tiempo total: {total_time:.3f}s")
+            logger.info(f"   📊 Resultados: {len(recommendations)}")
+            
+            if recommendations:
+                best_score = recommendations[0].similarity_score
+                worst_score = recommendations[-1].similarity_score
+                logger.info(f"   🎯 Score rango: {worst_score:.3f} - {best_score:.3f}")
+                
+                # Log de los primeros resultados
+                for i, rec in enumerate(recommendations[:3]):
+                    logger.debug(f"   #{i+1}: {rec.name} (score: {rec.similarity_score:.3f})")
+            
+            # 5. Retornar resultados ordenados por relevancia (ya están ordenados por Qdrant)
+            return RecommendationResponse(
+                query=description,
+                total_found=len(recommendations),
+                recommendations=recommendations
+            )
+                
         except Exception as e:
-            logger.error(f"❌ Error generando recomendaciones: {e}")
+            total_time = time.time() - start_time
+            logger.error(f"❌ Error generando recomendaciones ({total_time:.3f}s):")
+            logger.error(f"   📝 Query: '{description}'")
+            logger.error(f"   🔥 Tipo: {type(e).__name__}")
+            logger.error(f"   📄 Error: {e}")
+            
+            # Información adicional de contexto para debugging
+            logger.error(f"   🔧 Contexto del sistema:")
+            logger.error(f"      - Modelo OpenAI: {self.model}")
+            logger.error(f"      - Colección Qdrant: {self.qdrant_repo.collection_name}")
+            
             # En caso de error, devolver respuesta vacía
             return RecommendationResponse(
                 query=description,
